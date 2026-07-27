@@ -1,0 +1,79 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Raw materials / packaging / disposables (Main tab of the spreadsheet)
+model Ingredient {
+  id             Int       @id @default(autoincrement())
+  code           String    @unique // e.g. "1001", "2002", "3014"
+  name           String
+  unit           String? // oz | each
+  purchaseUnits  Float? // units per purchase (PU)
+  pricePerPU     Float? // $ per purchase
+  costPerUnit    Float     @default(0) // $ per unit (oz/each)
+  provider1      String?
+  provider1Price Float?
+  provider2      String?
+  provider2Price Float?
+  provider3      String?
+  provider3Price Float?
+  bomLines       BomLine[]
+}
+
+// Final products (4xxx codes - Pricing Dashboard tab)
+model Product {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique // e.g. "4001"
+  name        String
+  priceCents  Int? // reference sell price (POS price wins for revenue)
+  bomLines    BomLine[]
+  posMaps     PosMap[]
+}
+
+// BOM / Recipes tab: one component line of a product's recipe
+model BomLine {
+  id            Int        @id @default(autoincrement())
+  productId     Int
+  product       Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredientId  Int
+  ingredient    Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  componentType String? // Ingredient | Packaging | Disposable
+  quantity      Float      @default(0)
+}
+
+// Mixes tab: prepared mixes (their cost/oz feeds an Ingredient row)
+model Mix {
+  id                   Int       @id @default(autoincrement())
+  name                 String    @unique
+  linkedIngredientCode String? // ingredient whose costPerUnit derives from this mix
+  lines                MixLine[]
+}
+
+model MixLine {
+  id            Int     @id @default(autoincrement())
+  mixId         Int
+  mix           Mix     @relation(fields: [mixId], references: [id], onDelete: Cascade)
+  componentName String
+  oz            Float?
+  cost          Float?
+}
+
+// Maps a POS item name (Chillers POS) to a product BOM
+model PosMap {
+  id        Int      @id @default(autoincrement())
+  posName   String   @unique // exact item name in the POS
+  kind      String   @default("product") // product | zerocost | ignore
+  productId Int?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+}
+
+// Simple key/value settings (e.g. daily overhead)
+model Setting {
+  key   String @id
+  value String
+}
