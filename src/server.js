@@ -358,5 +358,87 @@ app.get("/api/inventory", async (req, res) => {
   }
 });
 
+
+// ---------- reports ----------
+// GET /api/report?period=week|month&date=YYYY-MM-DD (any date inside the period; default today)
+app.get("/api/report", async (req, res) => {
+  try {
+    const period = req.query.period === "month" ? "month" : "week";
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+    const ref = req.query.date || today;
+    const [y, m, d] = ref.split("-").map(Number);
+    let start, end;
+    if (period === "month") {
+      start = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-01`;
+      const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      end = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+    } else {
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      const dow = (dt.getUTCDay() + 6) % 7; // Monday = 0
+      const mon = new Date(dt); mon.setUTCDate(dt.getUTCDate() - dow);
+      const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
+      start = mon.toISOString().slice(0, 10);
+      end = sun.toISOString().slice(0, 10);
+    }
+    const [sales, maps, costs, overheadCents] = await Promise.all([
+      fetchSales(),
+      prisma.posMap.findMany({ include: { product: true } }),
+      bomCostByProductId(),
+      getDailyOverheadCents()
+    ]);
+    const mapByName = Object.fromEntries(maps.map(m2 => [m2.posName, m2]));
+
+    const days = {}, items = {};
+    let saleCount = 0;
+    for (const sale of sales) {
+      const dd = localDate(sale.createdAt);
+      if (dd < start || dd > end) continue;
+      saleCount++;
+      const day = (days[dd] ||= { date: dd, revenueCents: 0, costCents: 0, profitCents: 0, unmappedRevenueCents: 0, sales: 0 });
+      day.sales++;
+      for (const li of sale.items || []) {
+        const name = li.item ? li.item.name : `item #${li.itemId}`;
+        const it = (items[name] ||= { posName: name, qty: 0, revenueCents: 0, costCents: 0, profitCents: 0, mapped: true });
+        const revenue = li.lineTotalCents || 0;
+        const m2 = mapByName[name];
+        day.revenueCents += revenue;
+        it.qty += li.quantity || 0;
+        it.revenueCents += revenue;
+        if (m2 && m2.kind === "ignore") continue;
+        if (m2 && m2.kind === "zerocost") { day.profitCents += revenue; it.profitCents += revenue; }
+        else if (m2 && m2.product) {
+          const c = Math.round((costs[m2.productId] || 0) * 100) * (li.quantity || 0);
+          day.costCents += c; day.profitCents += revenue - c;
+          it.costCents += c; it.profitCents += revenue - c;
+        } else { day.unmappedRevenueCents += revenue; it.mapped = false; }
+      }
+    }
+
+    // overhead applies to each day of the period that has already passed
+    const lastDay = end < today ? end : today;
+    let daysElapsed = 0;
+    if (start <= lastDay) {
+      const s = new Date(start + "T00:00:00Z"), e = new Date(lastDay + "T00:00:00Z");
+      daysElapsed = Math.round((e - s) / 86400000) + 1;
+    }
+    const dayList = Object.values(days).sort((a, b) => a.date.localeCompare(b.date));
+    const itemList = Object.values(items).sort((a, b) => b.revenueCents - a.revenueCents);
+    const totals = dayList.reduce((t, x) => {
+      t.revenueCents += x.revenueCents; t.costCents += x.costCents;
+      t.profitCents += x.profitCents; t.unmappedRevenueCents += x.unmappedRevenueCents;
+      t.sales += x.sales; return t;
+    }, { revenueCents: 0, costCents: 0, profitCents: 0, unmappedRevenueCents: 0, sales: 0 });
+    const overheadTotalCents = overheadCents * daysElapsed;
+    res.json({
+      period, start, end, timezone: TZ, saleCount,
+      overheadCents, daysElapsed, overheadTotalCents,
+      days: dayList, items: itemList,
+      totals: { ...totals, netProfitCents: totals.profitCents - overheadTotalCents }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Management app on :${port} (POS: ${POS_URL}, TZ: ${TZ})`));
