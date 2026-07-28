@@ -43,6 +43,7 @@
   <nav id="nav">
     <button data-s="daily" class="active">Daily Profits</button>
     <button data-s="history">History</button>
+    <button data-s="inventory">Inventory</button>
     <button data-s="products">Products & BOM</button>
     <button data-s="ingredients">Ingredients</button>
     <button data-s="mixes">Mixes</button>
@@ -69,6 +70,18 @@
     <button class="btn" onclick="loadHistory()">Load</button>
   </div>
   <table id="histTable"></table>
+</section>
+
+<section id="s-inventory" class="section">
+  <div class="row">
+    <input type="date" id="invStart"> <span class="muted">to</span> <input type="date" id="invEnd">
+    <button class="btn" onclick="loadInventory()">Load</button>
+    <span class="muted">Usage is computed from POS sales &times; each product's BOM.</span>
+  </div>
+  <h3 style="margin:14px 0 8px">Ingredient usage & stock</h3>
+  <table id="invIngTable"></table>
+  <h3 style="margin:20px 0 8px">POS item stock (live from Chillers POS)</h3>
+  <table id="invPosTable"></table>
 </section>
 
 <section id="s-products" class="section">
@@ -136,7 +149,7 @@ $("#nav").addEventListener("click", e => {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === e.target));
   document.querySelectorAll(".section").forEach(x => x.classList.remove("active"));
   $("#s-" + e.target.dataset.s).classList.add("active");
-  ({daily: loadDaily, history: loadHistory, products: loadProducts, ingredients: loadIngredients,
+  ({daily: loadDaily, history: loadHistory, inventory: loadInventory, products: loadProducts, ingredients: loadIngredients,
     mixes: loadMixes, mappings: loadMappings, settings: loadSettings})[e.target.dataset.s]();
 });
 
@@ -181,6 +194,44 @@ async function loadHistory() {
       <td class="${d.netProfitCents >= 0 ? "pos" : "neg"}">${money(d.netProfitCents)}</td></tr>`;
   }
   $("#histTable").innerHTML = h;
+}
+
+
+// ---- Inventory ----
+async function loadInventory() {
+  const q = new URLSearchParams();
+  if ($("#invStart").value) q.set("start", $("#invStart").value);
+  if ($("#invEnd").value) q.set("end", $("#invEnd").value);
+  const data = await api("/api/inventory?" + q);
+  $("#invStart").value = data.start; $("#invEnd").value = data.end;
+  let h = "<tr><th>Code</th><th>Ingredient</th><th>Used (" + data.start +
+          (data.end !== data.start ? " to " + data.end : "") + ")</th><th>Last count</th><th>Counted on</th><th>Used since count</th><th>Est. remaining</th><th></th></tr>";
+  for (const g of data.ingredients) {
+    const low = g.estRemaining != null && g.estRemaining <= 0;
+    h += `<tr>
+      <td>${g.code}</td><td style="text-align:left">${g.name}</td>
+      <td>${g.used} ${g.unit || ""}</td>
+      <td>${g.stockOnHand ?? "—"}</td>
+      <td>${g.countedAt ? g.countedAt.slice(0, 10) : "—"}</td>
+      <td>${g.usageSinceCount ?? "—"}</td>
+      <td class="${low ? "neg" : g.estRemaining != null ? "pos" : ""}">${g.estRemaining ?? "—"} ${g.estRemaining != null ? (g.unit || "") : ""}</td>
+      <td><button class="btn ghost" onclick="setCount(${g.id}, '${g.code}')">Set count</button></td></tr>`;
+  }
+  $("#invIngTable").innerHTML = h;
+  let p = "<tr><th>POS item</th><th>Category</th><th>Stock</th></tr>";
+  for (const it of data.posItems) {
+    const cls = it.stock <= 0 ? "neg" : it.stock <= 10 ? "warn" : "";
+    p += `<tr><td>${it.name}</td><td>${it.category || ""}</td><td class="${cls}">${it.stock}</td></tr>`;
+  }
+  $("#invPosTable").innerHTML = p;
+}
+async function setCount(id, code) {
+  const v = prompt(`Physical count for ${code} (in its unit). This resets usage tracking from now:`);
+  if (v === null || v === "" || isNaN(+v)) return;
+  await api(`/api/ingredients/${id}`, { method: "PUT", body: JSON.stringify({
+    stockOnHand: +v, countedAt: new Date().toISOString()
+  })});
+  await loadInventory();
 }
 
 // ---- Products & BOM ----
