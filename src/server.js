@@ -26,6 +26,28 @@ async function fetchSales() {
   return data;
 }
 
+// POS sales + manual (paper) sales. Any date that has manual rows uses ONLY
+// the manual rows - the POS data for that date is ignored (paper = actual).
+async function getAllSales() {
+  const [pos, manual] = await Promise.all([
+    fetchSales(),
+    prisma.manualSale.findMany()
+  ]);
+  if (manual.length === 0) return pos;
+  const manualDates = new Set(manual.map(m => m.date));
+  const kept = pos.filter(s => !manualDates.has(localDate(s.createdAt)));
+  const byDate = {};
+  for (const m of manual) {
+    const sale = (byDate[m.date] ||= { id: `manual-${m.date}`, createdAt: `${m.date}T18:00:00.000Z`, manual: true, items: [] });
+    sale.items.push({
+      quantity: m.qty,
+      lineTotalCents: m.revenueCents,
+      item: { name: m.posName }
+    });
+  }
+  return kept.concat(Object.values(byDate));
+}
+
 async function bomCostByProductId() {
   const lines = await prisma.bomLine.findMany({ include: { ingredient: true } });
   const cost = {};
@@ -46,7 +68,7 @@ app.get("/api/daily", async (req, res) => {
   try {
     const date = req.query.date || new Date().toLocaleDateString("en-CA", { timeZone: TZ });
     const [sales, maps, costs, overheadCents] = await Promise.all([
-      fetchSales(),
+      getAllSales(),
       prisma.posMap.findMany({ include: { product: true } }),
       bomCostByProductId(),
       getDailyOverheadCents()
@@ -112,7 +134,7 @@ app.get("/api/daily", async (req, res) => {
 app.get("/api/range", async (req, res) => {
   try {
     const [sales, maps, costs, overheadCents] = await Promise.all([
-      fetchSales(),
+      getAllSales(),
       prisma.posMap.findMany({ include: { product: true } }),
       bomCostByProductId(),
       getDailyOverheadCents()
@@ -303,7 +325,7 @@ app.get("/api/inventory", async (req, res) => {
     const start = req.query.start || today;
     const end = req.query.end || today;
     const [sales, maps, ingredients, bomLines, posItemsRes] = await Promise.all([
-      fetchSales(),
+      getAllSales(),
       prisma.posMap.findMany(),
       prisma.ingredient.findMany({ orderBy: { code: "asc" } }),
       prisma.bomLine.findMany(),
@@ -381,7 +403,7 @@ app.get("/api/report", async (req, res) => {
       end = sun.toISOString().slice(0, 10);
     }
     const [sales, maps, costs, overheadCents] = await Promise.all([
-      fetchSales(),
+      getAllSales(),
       prisma.posMap.findMany({ include: { product: true } }),
       bomCostByProductId(),
       getDailyOverheadCents()
