@@ -34,6 +34,7 @@
   .section { display:none; } .section.active { display:block; }
   td input { width:100%; min-width:60px; }
   .tag { font-size:11px; padding:2px 8px; border-radius:99px; background:#0b1220; color:var(--dim); }
+  @media print { header, .row, .section { display:none!important } #s-reports { display:block!important } #s-reports .row { display:none!important } body { background:#fff; color:#000 } .card, table { background:#fff; color:#000; border:1px solid #ccc } th, td { border-bottom:1px solid #ccc } }
   @media (max-width:700px){ th,td{padding:6px 5px;font-size:12px;} }
 </style>
 </head>
@@ -44,6 +45,7 @@
     <button data-s="daily" class="active">Daily Profits</button>
     <button data-s="history">History</button>
     <button data-s="inventory">Inventory</button>
+    <button data-s="reports">Reports</button>
     <button data-s="products">Products & BOM</button>
     <button data-s="ingredients">Ingredients</button>
     <button data-s="mixes">Mixes</button>
@@ -82,6 +84,27 @@
   <table id="invIngTable"></table>
   <h3 style="margin:20px 0 8px">POS item stock (live from Chillers POS)</h3>
   <table id="invPosTable"></table>
+</section>
+
+<section id="s-reports" class="section">
+  <div class="row">
+    <select id="repPeriod">
+      <option value="week">Weekly (Mon-Sun)</option>
+      <option value="month">Monthly</option>
+    </select>
+    <input type="date" id="repDate">
+    <button class="btn" onclick="loadReport()">Generate</button>
+    <button class="btn ghost" onclick="window.print()">Print</button>
+    <button class="btn ghost" onclick="downloadReportCSV()">Download CSV</button>
+    <span class="muted" id="repMeta"></span>
+  </div>
+  <div id="repBody">
+    <div class="cards" id="repCards"></div>
+    <h3 style="margin:14px 0 8px">By day</h3>
+    <table id="repDayTable"></table>
+    <h3 style="margin:20px 0 8px">By item</h3>
+    <table id="repItemTable"></table>
+  </div>
 </section>
 
 <section id="s-products" class="section">
@@ -149,7 +172,7 @@ $("#nav").addEventListener("click", e => {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === e.target));
   document.querySelectorAll(".section").forEach(x => x.classList.remove("active"));
   $("#s-" + e.target.dataset.s).classList.add("active");
-  ({daily: loadDaily, history: loadHistory, inventory: loadInventory, products: loadProducts, ingredients: loadIngredients,
+  ({daily: loadDaily, history: loadHistory, inventory: loadInventory, reports: loadReport, products: loadProducts, ingredients: loadIngredients,
     mixes: loadMixes, mappings: loadMappings, settings: loadSettings})[e.target.dataset.s]();
 });
 
@@ -232,6 +255,63 @@ async function setCount(id, code) {
     stockOnHand: +v, countedAt: new Date().toISOString()
   })});
   await loadInventory();
+}
+
+
+// ---- Reports ----
+let lastReport = null;
+async function loadReport() {
+  const q = new URLSearchParams({ period: $("#repPeriod").value });
+  if ($("#repDate").value) q.set("date", $("#repDate").value);
+  const r = await api("/api/report?" + q);
+  lastReport = r;
+  if (!$("#repDate").value) $("#repDate").value = r.start;
+  $("#repMeta").textContent = `${r.period === "month" ? "Month" : "Week"} ${r.start} to ${r.end} - ${r.saleCount} sales - overhead ${money(r.overheadCents)}/day x ${r.daysElapsed} day(s)`;
+  const t = r.totals;
+  $("#repCards").innerHTML = `
+    <div class="card"><div class="lbl">Revenue</div><div class="val">${money(t.revenueCents)}</div></div>
+    <div class="card"><div class="lbl">Ingredient cost</div><div class="val">${money(t.costCents)}</div></div>
+    <div class="card"><div class="lbl">Profit before overhead</div><div class="val">${money(t.profitCents)}</div></div>
+    <div class="card"><div class="lbl">Overhead (${r.daysElapsed}d)</div><div class="val">-${money(r.overheadTotalCents)}</div></div>
+    <div class="card"><div class="lbl">Net profit</div><div class="val ${t.netProfitCents >= 0 ? "pos" : "neg"}">${money(t.netProfitCents)}</div></div>`;
+  let dh = "<tr><th>Date</th><th>Sales</th><th>Revenue</th><th>Cost</th><th>Profit</th><th>Net (after overhead)</th></tr>";
+  for (const d of r.days) {
+    const net = d.profitCents - r.overheadCents;
+    dh += `<tr><td>${d.date}</td><td>${d.sales}</td><td>${money(d.revenueCents)}</td><td>${money(d.costCents)}</td>
+      <td>${money(d.profitCents)}</td><td class="${net >= 0 ? "pos" : "neg"}">${money(net)}</td></tr>`;
+  }
+  $("#repDayTable").innerHTML = dh;
+  let ih = "<tr><th>Item</th><th>Qty</th><th>Revenue</th><th>Cost</th><th>Profit</th><th>Margin</th></tr>";
+  for (const it of r.items) {
+    const margin = it.mapped && it.revenueCents ? (100 * it.profitCents / it.revenueCents).toFixed(0) + "%" : "?";
+    ih += `<tr><td>${it.posName}${it.mapped ? "" : ' <span class="tag warn">unmapped</span>'}</td><td>${it.qty}</td>
+      <td>${money(it.revenueCents)}</td><td>${it.mapped ? money(it.costCents) : "?"}</td>
+      <td class="${it.profitCents >= 0 ? "pos" : "neg"}">${it.mapped ? money(it.profitCents) : "?"}</td><td>${margin}</td></tr>`;
+  }
+  $("#repItemTable").innerHTML = ih;
+}
+function downloadReportCSV() {
+  if (!lastReport) return alert("Generate a report first");
+  const r = lastReport, m = c => (c / 100).toFixed(2);
+  const rows = [
+    [`${r.period} report`, `${r.start} to ${r.end}`],
+    [],
+    ["TOTALS"], ["Revenue", m(r.totals.revenueCents)], ["Ingredient cost", m(r.totals.costCents)],
+    ["Profit before overhead", m(r.totals.profitCents)],
+    [`Overhead (${m(r.overheadCents)}/day x ${r.daysElapsed} days)`, m(r.overheadTotalCents)],
+    ["Net profit", m(r.totals.netProfitCents)],
+    [],
+    ["BY DAY"], ["Date", "Sales", "Revenue", "Cost", "Profit", "Net after overhead"],
+    ...r.days.map(d => [d.date, d.sales, m(d.revenueCents), m(d.costCents), m(d.profitCents), m(d.profitCents - r.overheadCents)]),
+    [],
+    ["BY ITEM"], ["Item", "Qty", "Revenue", "Cost", "Profit"],
+    ...r.items.map(i => [i.posName, i.qty, m(i.revenueCents), i.mapped ? m(i.costCents) : "?", i.mapped ? m(i.profitCents) : "?"])
+  ];
+  const csv = rows.map(row => row.map(c => `"${String(c ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = `report-${r.period}-${r.start}.csv`;
+  a.click();
 }
 
 // ---- Products & BOM ----
