@@ -57,6 +57,32 @@ async function bomCostByProductId() {
   return cost; // dollars per unit sold
 }
 
+// Credit-card revenue per date. Paper days use the sheet's "V-tarjeta" total;
+// other days sum POS sales with a credit/card payment method.
+async function cardCentsByDate() {
+  const [pos, manualDays, manualDates0] = await Promise.all([
+    fetchSales(),
+    prisma.manualDay.findMany(),
+    prisma.manualSale.findMany({ select: { date: true }, distinct: ["date"] })
+  ]);
+  const manualDates = new Set(manualDates0.map(m => m.date));
+  const map = {};
+  for (const s of pos) {
+    const d = localDate(s.createdAt);
+    if (manualDates.has(d)) continue;
+    const pm = String(s.paymentMethod || "").toLowerCase();
+    if (pm.includes("credit") || pm.includes("card") || pm.includes("tarjeta"))
+      map[d] = (map[d] || 0) + (s.totalCents || 0);
+  }
+  for (const md of manualDays) map[md.date] = (map[md.date] || 0) + md.cardCents;
+  return map;
+}
+
+async function getCardFeePct() {
+  const s = await prisma.setting.findUnique({ where: { key: "cardFeePct" } });
+  return s ? parseFloat(s.value) || 0 : 0;
+}
+
 async function getDailyOverheadCents() {
   const s = await prisma.setting.findUnique({ where: { key: "dailyOverheadCents" } });
   return s ? parseInt(s.value, 10) || 0 : 0;
@@ -67,11 +93,13 @@ async function getDailyOverheadCents() {
 app.get("/api/daily", async (req, res) => {
   try {
     const date = req.query.date || new Date().toLocaleDateString("en-CA", { timeZone: TZ });
-    const [sales, maps, costs, overheadCents] = await Promise.all([
+    const [sales, maps, costs, overheadCents, cardByDate, cardFeePct] = await Promise.all([
       getAllSales(),
       prisma.posMap.findMany({ include: { product: true } }),
       bomCostByProductId(),
-      getDailyOverheadCents()
+      getDailyOverheadCents(),
+      cardCentsByDate(),
+      getCardFeePct()
     ]);
     const mapByName = Object.fromEntries(maps.map(m => [m.posName, m]));
 
@@ -116,13 +144,17 @@ app.get("/api/daily", async (req, res) => {
       return t;
     }, { qty: 0, revenueCents: 0, costCents: 0, profitCents: 0, unmappedRevenueCents: 0 });
 
+    const cardCents = cardByDate[date] || 0;
+    const cardFeeCents = Math.round(cardCents * cardFeePct / 100);
     res.json({
       date, timezone: TZ, saleCount,
-      overheadCents,
+      baseOverheadCents: overheadCents,
+      cardCents, cardFeePct, cardFeeCents,
+      overheadCents: overheadCents + cardFeeCents,
       items: list,
       totals: {
         ...totals,
-        netProfitCents: totals.profitCents - overheadCents
+        netProfitCents: totals.profitCents - overheadCents - cardFeeCents
       }
     });
   } catch (e) {
@@ -133,11 +165,13 @@ app.get("/api/daily", async (req, res) => {
 // GET /api/range?start=YYYY-MM-DD&end=YYYY-MM-DD  -> per-day totals
 app.get("/api/range", async (req, res) => {
   try {
-    const [sales, maps, costs, overheadCents] = await Promise.all([
+    const [sales, maps, costs, overheadCents, cardByDate, cardFeePct] = await Promise.all([
       getAllSales(),
       prisma.posMap.findMany({ include: { product: true } }),
       bomCostByProductId(),
-      getDailyOverheadCents()
+      getDailyOverheadCents(),
+      cardCentsByDate(),
+      getCardFeePct()
     ]);
     const mapByName = Object.fromEntries(maps.map(m => [m.posName, m]));
     const days = {};
@@ -161,8 +195,13 @@ app.get("/api/range", async (req, res) => {
       }
     }
     const list = Object.values(days).sort((a, b) => b.date.localeCompare(a.date));
-    for (const d of list) d.netProfitCents = d.profitCents - overheadCents;
-    res.json({ overheadCents, days: list });
+    for (const d of list) {
+      d.cardCents = cardByDate[d.date] || 0;
+      d.cardFeeCents = Math.round(d.cardCents * cardFeePct / 100);
+      d.overheadCents = overheadCents + d.cardFeeCents;
+      d.netProfitCents = d.profitCents - d.overheadCents;
+    }
+    res.json({ overheadCents, cardFeePct, days: list });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -402,11 +441,13 @@ app.get("/api/report", async (req, res) => {
       start = mon.toISOString().slice(0, 10);
       end = sun.toISOString().slice(0, 10);
     }
-    const [sales, maps, costs, overheadCents] = await Promise.all([
+    const [sales, maps, costs, overheadCents, cardByDate, cardFeePct] = await Promise.all([
       getAllSales(),
       prisma.posMap.findMany({ include: { product: true } }),
       bomCostByProductId(),
-      getDailyOverheadCents()
+      getDailyOverheadCents(),
+      cardCentsByDate(),
+      getCardFeePct()
     ]);
     const mapByName = Object.fromEntries(maps.map(m2 => [m2.posName, m2]));
 
@@ -450,10 +491,17 @@ app.get("/api/report", async (req, res) => {
       t.profitCents += x.profitCents; t.unmappedRevenueCents += x.unmappedRevenueCents;
       t.sales += x.sales; return t;
     }, { revenueCents: 0, costCents: 0, profitCents: 0, unmappedRevenueCents: 0, sales: 0 });
-    const overheadTotalCents = overheadCents * daysElapsed;
+    let cardFeeTotalCents = 0, cardTotalCents = 0;
+    for (const d of dayList) {
+      d.cardCents = cardByDate[d.date] || 0;
+      d.cardFeeCents = Math.round(d.cardCents * cardFeePct / 100);
+      cardTotalCents += d.cardCents;
+      cardFeeTotalCents += d.cardFeeCents;
+    }
+    const overheadTotalCents = overheadCents * daysElapsed + cardFeeTotalCents;
     res.json({
       period, start, end, timezone: TZ, saleCount,
-      overheadCents, daysElapsed, overheadTotalCents,
+      overheadCents, daysElapsed, cardFeePct, cardTotalCents, cardFeeTotalCents, overheadTotalCents,
       days: dayList, items: itemList,
       totals: { ...totals, netProfitCents: totals.profitCents - overheadTotalCents }
     });
