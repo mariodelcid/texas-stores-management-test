@@ -148,8 +148,10 @@
 <section id="s-settings" class="section">
   <div class="card" style="max-width:420px">
     <div class="lbl">Daily overhead ($ per day, subtracted from total daily profit)</div>
+    <div class="row"><input type="number" step="1" id="setOverhead"></div>
+    <div class="lbl" style="margin-top:10px">Credit card fee (% of card sales, added to each day's overhead)</div>
     <div class="row">
-      <input type="number" step="1" id="setOverhead">
+      <input type="number" step="0.01" id="setCardFee">
       <button class="btn" onclick="saveSettings()">Save</button>
     </div>
   </div>
@@ -187,7 +189,7 @@ async function loadDaily() {
     <div class="card"><div class="lbl">Revenue</div><div class="val">${money(t.revenueCents)}</div></div>
     <div class="card"><div class="lbl">Ingredient cost</div><div class="val">${money(t.costCents)}</div></div>
     <div class="card"><div class="lbl">Profit before overhead</div><div class="val">${money(t.profitCents)}</div></div>
-    <div class="card"><div class="lbl">Overhead</div><div class="val">-${money(data.overheadCents)}</div></div>
+    <div class="card"><div class="lbl">Overhead ($${(data.baseOverheadCents/100).toFixed(0)} + ${data.cardFeePct}% of ${money(data.cardCents)} card)</div><div class="val">-${money(data.overheadCents)}</div></div>
     <div class="card"><div class="lbl">Net profit (day)</div><div class="val ${t.netProfitCents >= 0 ? "pos" : "neg"}">${money(t.netProfitCents)}</div></div>`;
   let h = "<tr><th>Item</th><th>BOM</th><th>Qty</th><th>Revenue</th><th>Cost</th><th>Profit</th><th>Margin</th></tr>";
   for (const r of data.items) {
@@ -210,10 +212,10 @@ async function loadHistory() {
   if ($("#histStart").value) q.set("start", $("#histStart").value);
   if ($("#histEnd").value) q.set("end", $("#histEnd").value);
   const data = await api("/api/range?" + q);
-  let h = "<tr><th>Date</th><th>Revenue</th><th>Cost</th><th>Profit</th><th>Overhead</th><th>Net</th></tr>";
+  let h = "<tr><th>Date</th><th>Revenue</th><th>Card sales</th><th>Cost</th><th>Profit</th><th>Overhead</th><th>Net</th></tr>";
   for (const d of data.days) {
-    h += `<tr><td>${d.date}</td><td>${money(d.revenueCents)}</td><td>${money(d.costCents)}</td>
-      <td>${money(d.profitCents)}</td><td>-${money(data.overheadCents)}</td>
+    h += `<tr><td>${d.date}</td><td>${money(d.revenueCents)}</td><td>${money(d.cardCents || 0)}</td><td>${money(d.costCents)}</td>
+      <td>${money(d.profitCents)}</td><td>-${money(d.overheadCents)}</td>
       <td class="${d.netProfitCents >= 0 ? "pos" : "neg"}">${money(d.netProfitCents)}</td></tr>`;
   }
   $("#histTable").innerHTML = h;
@@ -266,18 +268,18 @@ async function loadReport() {
   const r = await api("/api/report?" + q);
   lastReport = r;
   if (!$("#repDate").value) $("#repDate").value = r.start;
-  $("#repMeta").textContent = `${r.period === "month" ? "Month" : "Week"} ${r.start} to ${r.end} - ${r.saleCount} sales - overhead ${money(r.overheadCents)}/day x ${r.daysElapsed} day(s)`;
+  $("#repMeta").textContent = `${r.period === "month" ? "Month" : "Week"} ${r.start} to ${r.end} - ${r.saleCount} sales - overhead ${money(r.overheadCents)}/day x ${r.daysElapsed} day(s) + ${r.cardFeePct}% card fee (${money(r.cardFeeTotalCents)} on ${money(r.cardTotalCents)} card sales)`;
   const t = r.totals;
   $("#repCards").innerHTML = `
     <div class="card"><div class="lbl">Revenue</div><div class="val">${money(t.revenueCents)}</div></div>
     <div class="card"><div class="lbl">Ingredient cost</div><div class="val">${money(t.costCents)}</div></div>
     <div class="card"><div class="lbl">Profit before overhead</div><div class="val">${money(t.profitCents)}</div></div>
-    <div class="card"><div class="lbl">Overhead (${r.daysElapsed}d)</div><div class="val">-${money(r.overheadTotalCents)}</div></div>
+    <div class="card"><div class="lbl">Overhead (${r.daysElapsed}d + card fees)</div><div class="val">-${money(r.overheadTotalCents)}</div></div>
     <div class="card"><div class="lbl">Net profit</div><div class="val ${t.netProfitCents >= 0 ? "pos" : "neg"}">${money(t.netProfitCents)}</div></div>`;
-  let dh = "<tr><th>Date</th><th>Sales</th><th>Revenue</th><th>Cost</th><th>Profit</th><th>Net (after overhead)</th></tr>";
+  let dh = "<tr><th>Date</th><th>Sales</th><th>Revenue</th><th>Card</th><th>Cost</th><th>Profit</th><th>Net (after overhead)</th></tr>";
   for (const d of r.days) {
-    const net = d.profitCents - r.overheadCents;
-    dh += `<tr><td>${d.date}</td><td>${d.sales}</td><td>${money(d.revenueCents)}</td><td>${money(d.costCents)}</td>
+    const net = d.profitCents - r.overheadCents - (d.cardFeeCents || 0);
+    dh += `<tr><td>${d.date}</td><td>${d.sales}</td><td>${money(d.revenueCents)}</td><td>${money(d.cardCents || 0)}</td><td>${money(d.costCents)}</td>
       <td>${money(d.profitCents)}</td><td class="${net >= 0 ? "pos" : "neg"}">${money(net)}</td></tr>`;
   }
   $("#repDayTable").innerHTML = dh;
@@ -298,11 +300,12 @@ function downloadReportCSV() {
     [],
     ["TOTALS"], ["Revenue", m(r.totals.revenueCents)], ["Ingredient cost", m(r.totals.costCents)],
     ["Profit before overhead", m(r.totals.profitCents)],
-    [`Overhead (${m(r.overheadCents)}/day x ${r.daysElapsed} days)`, m(r.overheadTotalCents)],
+    [`Overhead (${m(r.overheadCents)}/day x ${r.daysElapsed} days + ${r.cardFeePct}% card fee)`, m(r.overheadTotalCents)],
+    [`Card sales (fee ${m(r.cardFeeTotalCents)})`, m(r.cardTotalCents)],
     ["Net profit", m(r.totals.netProfitCents)],
     [],
     ["BY DAY"], ["Date", "Sales", "Revenue", "Cost", "Profit", "Net after overhead"],
-    ...r.days.map(d => [d.date, d.sales, m(d.revenueCents), m(d.costCents), m(d.profitCents), m(d.profitCents - r.overheadCents)]),
+    ...r.days.map(d => [d.date, d.sales, m(d.revenueCents), m(d.costCents), m(d.profitCents), m(d.profitCents - r.overheadCents - (d.cardFeeCents || 0))]),
     [],
     ["BY ITEM"], ["Item", "Qty", "Revenue", "Cost", "Profit"],
     ...r.items.map(i => [i.posName, i.qty, m(i.revenueCents), i.mapped ? m(i.costCents) : "?", i.mapped ? m(i.profitCents) : "?"])
@@ -510,10 +513,12 @@ async function saveMap(btn) {
 async function loadSettings() {
   const s = await api("/api/settings");
   $("#setOverhead").value = ((+s.dailyOverheadCents || 0) / 100).toFixed(0);
+  $("#setCardFee").value = s.cardFeePct ?? "8.25";
 }
 async function saveSettings() {
   await api("/api/settings", { method: "PUT", body: JSON.stringify({
-    dailyOverheadCents: Math.round(+$("#setOverhead").value * 100) || 0
+    dailyOverheadCents: Math.round(+$("#setOverhead").value * 100) || 0,
+    cardFeePct: +$("#setCardFee").value || 0
   })});
   alert("Saved");
 }
