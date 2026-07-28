@@ -22,6 +22,8 @@ model Ingredient {
   provider2Price Float?
   provider3      String?
   provider3Price Float?
+  stockOnHand    Float? // last physical count
+  countedAt      DateTime? // when the count was taken
   bomLines       BomLine[]
 }
 
