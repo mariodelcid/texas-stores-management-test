@@ -291,5 +291,72 @@ app.put("/api/settings", async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+
+// ---------- inventory ----------
+// GET /api/inventory?start=YYYY-MM-DD&end=YYYY-MM-DD
+// - POS item stock (live from the POS)
+// - ingredient usage in the range (from sales x BOM)
+// - estimated remaining per ingredient (last count - usage since count)
+app.get("/api/inventory", async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+    const start = req.query.start || today;
+    const end = req.query.end || today;
+    const [sales, maps, ingredients, bomLines, posItemsRes] = await Promise.all([
+      fetchSales(),
+      prisma.posMap.findMany(),
+      prisma.ingredient.findMany({ orderBy: { code: "asc" } }),
+      prisma.bomLine.findMany(),
+      fetch(`${POS_URL}/api/items`).then(r => r.json()).catch(() => [])
+    ]);
+    const mapByName = Object.fromEntries(maps.map(m => [m.posName, m]));
+    const bomByProduct = {};
+    for (const l of bomLines) (bomByProduct[l.productId] ||= []).push(l);
+
+    const rangeUsage = {};      // ingredientId -> qty used in [start, end]
+    const sinceUsage = {};      // ingredientId -> qty used since that ingredient's countedAt
+    const counted = Object.fromEntries(
+      ingredients.filter(i => i.countedAt).map(i => [i.id, new Date(i.countedAt).getTime()])
+    );
+
+    for (const sale of sales) {
+      const d = localDate(sale.createdAt);
+      const t = new Date(sale.createdAt).getTime();
+      const inRange = d >= start && d <= end;
+      for (const li of sale.items || []) {
+        const name = li.item ? li.item.name : null;
+        const m = name && mapByName[name];
+        if (!m || m.kind !== "product" || !m.productId) continue;
+        for (const bl of bomByProduct[m.productId] || []) {
+          const used = bl.quantity * (li.quantity || 0);
+          if (inRange) rangeUsage[bl.ingredientId] = (rangeUsage[bl.ingredientId] || 0) + used;
+          if (counted[bl.ingredientId] && t > counted[bl.ingredientId])
+            sinceUsage[bl.ingredientId] = (sinceUsage[bl.ingredientId] || 0) + used;
+        }
+      }
+    }
+
+    res.json({
+      start, end, timezone: TZ,
+      ingredients: ingredients.map(i => {
+        const usageSinceCount = i.countedAt ? +(sinceUsage[i.id] || 0).toFixed(2) : null;
+        return {
+          id: i.id, code: i.code, name: i.name, unit: i.unit,
+          used: +(rangeUsage[i.id] || 0).toFixed(2),
+          stockOnHand: i.stockOnHand, countedAt: i.countedAt,
+          usageSinceCount,
+          estRemaining: i.stockOnHand != null && usageSinceCount != null
+            ? +(i.stockOnHand - usageSinceCount).toFixed(2) : null
+        };
+      }),
+      posItems: (Array.isArray(posItemsRes) ? posItemsRes : []).map(p => ({
+        name: p.name, category: p.category, stock: p.stock, priceCents: p.priceCents
+      })).sort((a, b) => (a.stock ?? 0) - (b.stock ?? 0))
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Management app on :${port} (POS: ${POS_URL}, TZ: ${TZ})`));
