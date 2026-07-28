@@ -4,10 +4,57 @@ const { ingredients, products, bom, posMaps, mixes } = require("./data.js");
 
 const prisma = new PrismaClient();
 
+async function ensureExtras() {
+  // Elote Entero product + BOM (not in the original sheet)
+  const codes = ["1002","1003","1005","1006","1007","1008","1009","1010","3014"];
+  const ing = Object.fromEntries(
+    (await prisma.ingredient.findMany({ where: { code: { in: codes } } })).map(i => [i.code, i.id])
+  );
+  let entero = await prisma.product.findUnique({ where: { code: "4040" } });
+  if (!entero) {
+    entero = await prisma.product.create({ data: { code: "4040", name: "Elote Entero", priceCents: 500 } });
+    const lines = [["1002",1],["1003",1],["1005",1],["1006",1],["1007",1],["1008",1],["1009",1],["1010",1],["3014",2]];
+    for (const [c, q] of lines) {
+      if (ing[c]) await prisma.bomLine.create({
+        data: { productId: entero.id, ingredientId: ing[c], componentType: c === "3014" ? "Disposable" : "Ingredient", quantity: q }
+      });
+    }
+    console.log("Created product 4040 Elote Entero with BOM.");
+  }
+  // Mappings used by the manual (paper) sales import
+  const mapTo = async (posName, productCode) => {
+    const p = await prisma.product.findUnique({ where: { code: productCode } });
+    if (!p) return;
+    await prisma.posMap.upsert({
+      where: { posName },
+      create: { posName, kind: "product", productId: p.id },
+      update: {}
+    });
+  };
+  await mapTo("Elote Entero", "4040");
+  await mapTo("Drink 24 oz", "4019"); // representative 24oz-cup drink (horchata) for costing
+  await mapTo("Drink 20 oz", "4016"); // representative 20oz-cup drink (chamoyada) for costing
+  await mapTo("Hot Drink", "4038");   // representative hot-cup drink
+}
+
+async function importManualSales() {
+  const count = await prisma.manualSale.count();
+  if (count > 0) return;
+  const { manualSales } = require("./manual-sales.js");
+  await prisma.manualSale.createMany({
+    data: manualSales.map(([date, posName, qty, revenue]) => ({
+      date, posName, qty, revenueCents: Math.round(revenue * 100)
+    }))
+  });
+  console.log(`Imported ${manualSales.length} manual sale lines from the paper sheets.`);
+}
+
 async function main() {
   const count = await prisma.ingredient.count();
   if (count > 0) {
-    console.log("Database already seeded, skipping.");
+    console.log("Database already seeded, skipping base seed.");
+    await ensureExtras();
+    await importManualSales();
     return;
   }
   console.log("Seeding database from spreadsheet data...");
@@ -62,6 +109,8 @@ async function main() {
   });
 
   console.log("Seed complete.");
+  await ensureExtras();
+  await importManualSales();
 }
 
 main()

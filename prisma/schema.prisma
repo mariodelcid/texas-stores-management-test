@@ -79,3 +79,15 @@ model Setting {
   key   String @id
   value String
 }
+
+// Daily sales transcribed from the paper notebook (photos). For any date that
+// has manual rows, POS sales are IGNORED and these are used instead.
+model ManualSale {
+  id           Int    @id @default(autoincrement())
+  date         String // YYYY-MM-DD (store timezone)
+  posName      String // mapped via PosMap like POS item names
+  qty          Float  @default(0)
+  revenueCents Int    @default(0)
+
+  @@index([date])
+}
