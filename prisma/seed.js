@@ -38,15 +38,26 @@ async function ensureExtras() {
 }
 
 async function importManualSales() {
-  const count = await prisma.manualSale.count();
-  if (count > 0) return;
-  const { manualSales } = require("./manual-sales.js");
-  await prisma.manualSale.createMany({
-    data: manualSales.map(([date, posName, qty, revenue]) => ({
-      date, posName, qty, revenueCents: Math.round(revenue * 100)
-    }))
+  const { manualSales, manualCard } = require("./manual-sales.js");
+  if ((await prisma.manualSale.count()) === 0) {
+    await prisma.manualSale.createMany({
+      data: manualSales.map(([date, posName, qty, revenue]) => ({
+        date, posName, qty, revenueCents: Math.round(revenue * 100)
+      }))
+    });
+    console.log(`Imported ${manualSales.length} manual sale lines from the paper sheets.`);
+  }
+  if ((await prisma.manualDay.count()) === 0 && manualCard) {
+    await prisma.manualDay.createMany({
+      data: manualCard.map(([date, card]) => ({ date, cardCents: Math.round(card * 100) }))
+    });
+    console.log(`Imported card totals for ${manualCard.length} paper days.`);
+  }
+  await prisma.setting.upsert({
+    where: { key: "cardFeePct" },
+    create: { key: "cardFeePct", value: "8.25" },
+    update: {}
   });
-  console.log(`Imported ${manualSales.length} manual sale lines from the paper sheets.`);
 }
 
 async function main() {

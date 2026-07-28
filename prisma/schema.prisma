@@ -91,3 +91,9 @@ model ManualSale {
 
   @@index([date])
 }
+
+// Per-day info from the paper sheets that is not itemized (card sales total)
+model ManualDay {
+  date      String @id // YYYY-MM-DD
+  cardCents Int    @default(0) // "V-tarjeta" amount
+}
